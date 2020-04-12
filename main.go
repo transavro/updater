@@ -43,23 +43,6 @@ func GetBytes(key interface{}) ([]byte, error) {
 }
 
 func main() {
-
-	// to add a cert for https request in golang
-	//caCert, err := ioutil.ReadFile("server.crt")
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-	//caCertPool := x509.NewCertPool()
-	//caCertPool.AppendCertsFromPEM(caCert)
-	//
-	//client := &http.Client{
-	//	Transport: &http.Transport{
-	//		TLSClientConfig: &tls.Config{
-	//			RootCAs:      caCertPool,
-	//		},
-	//	},
-	//}
-
 	reqBody, err := makingRequestBody()
 	if err != nil {
 		log.Fatal(err)
@@ -67,9 +50,7 @@ func main() {
 
 	jsonString, err := json.Marshal(reqBody)
 
-	//making api call
-
-	req, err := http.NewRequest("GET", "http://192.168.0.106:9876/update.json", bytes.NewBuffer(jsonString))
+	req, err := http.NewRequest("GET", "http://192.168.1.9:9876/update.json", bytes.NewBuffer(jsonString))
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -105,6 +86,104 @@ func main() {
 	log.Println("Completed.")
 }
 
+func downloadNInstall(update *Updater) (err error) {
+	// Downloading a file.
+	updateFile, err := DownloadFile(update.DownloadURL)
+	if err != nil {
+		return err
+	}
+	//installing a file
+	err = updateProcess(updateFile, update, "sh", "-c", "pm install "+updateFile.Name())
+	if err == nil {
+		// check if the app is installed or not
+		result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
+		if err != nil {
+			return err
+		}
+		if result == "" {
+			return errors.New("App not installed please check the command")
+		}
+		log.Println(update.PackageName, "  installed successfully.")
+		return err
+	}
+	return err
+}
+
+func uninstallApp(packageName string) error {
+	// uninstalling the app will give two result first will give "success" or a big stack trace.
+	cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("pm uninstall  %s", packageName)).Output()
+	if err != nil {
+		return err
+	}
+	if strings.Compare("Success", string(cmdOut)) == 1 {
+		return errors.New(fmt.Sprintf("Unable to uninstall the app %s", packageName))
+	}
+	log.Println(packageName, "  uninstalled successfully.")
+	return nil
+}
+
+func compareAppVersion(serverAppVersion int, packageName string) (isServerVersionHigher bool, err error) {
+	// if app is already installed.. compare the version of the app.
+	log.Printf("app already installed %s", packageName)
+	cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("dumpsys package %s | grep versionCode", packageName)).Output()
+	if err != nil {
+		return false, err
+	}
+	var deviceAppVersion int
+	for _, s := range strings.Split(string(cmdOut), " ") {
+		if s != "" && strings.Contains(s, "versionCode") {
+			deviceAppVersion, _ = strconv.Atoi(strings.TrimSpace(strings.Replace(s, "versionCode=", "", -1)))
+			break
+		}
+	}
+	if serverAppVersion > deviceAppVersion {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+func isAppInstalled(packageName string) (bool, error) {
+	// check if the app is installed or not
+	if result, err := execute("sh", "-c", "pm list packages  "+packageName); err != nil {
+		return false, err
+	} else if result == "" {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+func comapareOTAVersion(buildDate string, isFOTA bool) (isOTAVersionHigher bool, err error) {
+	// compare the fota version
+	var data string
+	if isFOTA {
+		data, err = getProp([]string{"ro.cvte.ota.version", "ro.build.date.utc"})
+		if err != nil {
+			return false, err
+		}
+	} else {
+		data, err = getProp([]string{"ro.cloudwalker.cota.version"})
+		if err != nil {
+			return false, err
+		}
+	}
+
+	localVersion, err := strconv.Atoi(strings.TrimSpace(strings.Replace(strings.Replace(data, "\n", "", -1), "_", "", -1)))
+	if err != nil {
+		return false, err
+	}
+	serverVersion, err := strconv.Atoi(strings.Replace(buildDate, "_", "", -1))
+	if err != nil {
+		return false, err
+	}
+	if serverVersion > localVersion {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
 func handlingUpdate(update *Updater) error {
 
 	var (
@@ -116,209 +195,74 @@ func handlingUpdate(update *Updater) error {
 	case "install":
 		{
 			// check if the app is installed or not
-			result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-			if err != nil {
+			if result, err := isAppInstalled(update.PackageName); err != nil {
 				return err
-			}
-			if result == "" {
-				log.Printf("app not found %s", update.PackageName)
-				// if the app is not installed,, then download and install.
-				// Downloading a file.
-				updateFile, err = DownloadFile(update.DownloadURL)
-				if err != nil {
+			} else if result {
+				// comparing app versions
+				if isHigher, err := compareAppVersion(update.VersionCode, update.PackageName); err != nil {
 					return err
+				} else if isHigher {
+					return downloadNInstall(update)
 				}
-				// installing the file
-				err = updateProcess(updateFile, update, "sh", "-c", "pm install "+updateFile.Name())
-				if err == nil {
-					// check if the app is installed or not
-					result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-					if err != nil {
-						return err
-					}
-					if result == "" {
-						return errors.New("App not installed please check the command")
-					}
-					log.Println(update.PackageName, "  installed successfully.")
-				}
-				return err
 			} else {
-				// if app is already installed.. compare the version of the app.
-				log.Printf("app already installed %s", update.PackageName)
-				cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("dumpsys package %s | grep versionCode", update.PackageName)).Output()
-				if err != nil {
-					return err
-				}
-				var appVersionCode int
-				for _, s := range strings.Split(string(cmdOut), " ") {
-					if s != "" && strings.Contains(s, "versionCode") {
-						appVersionCode, _ = strconv.Atoi(strings.TrimSpace(strings.Replace(s, "versionCode=", "", -1)))
-						break
-					}
-				}
-				log.Printf("sversion %s appVersion %s", update.VersionCode, appVersionCode)
-				if update.VersionCode > appVersionCode {
-					// if version code is greater, download and install the app
-					// Downloading a file.
-					updateFile, err = DownloadFile(update.DownloadURL)
-					if err != nil {
-						return err
-					}
-					// installing the file
-					err = updateProcess(updateFile, update, "sh", "-c", "pm install "+updateFile.Name())
-					if err == nil {
-						// check if the app is installed or not
-						result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-						if err != nil {
-							return err
-						}
-						if result == "" {
-							return errors.New("App not installed please check the command")
-						}
-						log.Println(update.PackageName, "  updated successfully.")
-					}
-					return err
-				} else {
-					return nil
-				}
+				return downloadNInstall(update)
 			}
 		}
 	case "uninstall":
 		{
-			// uninstalling the app will give two result first will give "success" or a big stack trace.
-			cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("pm uninstall  %s", update.PackageName)).Output()
-			if err != nil {
-				return err
-			}
-			if strings.Compare("Success", string(cmdOut)) == 1 {
-				return errors.New(fmt.Sprintf("Unable to uninstall the app %s", update.PackageName))
-			}
-			log.Println(update.PackageName, "  uninstalled successfully.")
-			return nil
+			return uninstallApp(update.PackageName)
 		}
 	case "downgrade":
 		{
-
-			// check if the package is already installed or not
-			result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-			if err != nil {
+			// check if the app is installed or not
+			if result, err := isAppInstalled(update.PackageName); err != nil {
 				return err
-			}
-			if result == "" {
-				// if the app is not installed,, then download and install the downgraded version from server.
-				// Downloading a file.
-				updateFile, err = DownloadFile(update.DownloadURL)
-				if err != nil {
+			} else if result {
+				// comparing app versions
+				if isHigher, err := compareAppVersion(update.VersionCode, update.PackageName); err != nil {
 					return err
-				}
-				// installing the file
-				err = updateProcess(updateFile, update, "sh", "-c", "pm install "+updateFile.Name())
-				if err == nil {
-					// check if the app is installed or not
-					result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-					if err != nil {
+				} else if !isHigher {
+					// Bingo got the lower version, so uninstall the higherVersion and download n install the lower version
+					if err = uninstallApp(update.PackageName); err != nil {
 						return err
 					}
-					if result == "" {
-						return errors.New("App not installed please check the command")
-					}
-					log.Println(update.PackageName, "  installed successfully.")
+					return downloadNInstall(update)
 				}
-				return err
 			} else {
-				// if app is installed compare the version code
-				cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("dumpsys package %s | grep versionCode", update.PackageName)).Output()
-				if err != nil {
-					return err
-				}
-				var appVersionCode int
-				for _, s := range strings.Split(string(cmdOut), " ") {
-					if s != "" && strings.Contains(s, "versionCode") {
-						appVersionCode, _ = strconv.Atoi(strings.TrimSpace(strings.Replace(s, "versionCode=", "", -1)))
-						break
-					}
-				}
-				// Look here care fully, the below code will force the app to be at the version coming from the server.
-				if update.VersionCode != appVersionCode {
-					//uninstalling the app
-					cmdOut, _ = exec.Command("sh", "-c", fmt.Sprintf("pm uninstall  %s", update.PackageName)).Output()
-					if strings.Compare("Success", string(cmdOut)) == 1 {
-						return errors.New(fmt.Sprintf("Unable to uninstall the app %s", update.PackageName))
-					}
-					log.Println(update.PackageName, " downgrade uninstalled successfully.")
-					// Downloading a file.
-					updateFile, err = DownloadFile(update.DownloadURL)
-					if err != nil {
-						return err
-					}
-					// installing the file
-					err = updateProcess(updateFile, update, "sh", "-c", "pm install "+updateFile.Name())
-					if err == nil {
-						// check if the app is installed or not
-						result, err := execute("sh", "-c", "pm list packages  "+update.PackageName)
-						if err != nil {
-							return err
-						}
-						if result == "" {
-							return errors.New("App not installed please check the command")
-						}
-						log.Println(update.PackageName, "  downgraded successfully.")
-					}
-					return err
-				}
+				return downloadNInstall(update)
 			}
 		}
 	case "fota":
 		{
 			// compare the fota version
-			data, err := getProp([]string{"ro.cvte.ota.version", "ro.build.date.utc"})
-			if err != nil {
+			if result, err := comapareOTAVersion(update.BuildDate, true); err != nil {
 				return err
-			}
-			fotaVersion, err := strconv.Atoi(strings.TrimSpace(strings.Replace(strings.Replace(data, "\n", "", -1), "_", "", -1)))
-			if err != nil {
-				return err
-			}
-			serverVersion, err := strconv.Atoi(strings.Replace(update.BuildDate, "_", "", -1))
-			if err != nil {
-				return err
-			}
-			if serverVersion > fotaVersion {
+			} else if result {
 				// Downloading a zip file.
-				updateFile, err = DownloadFile(update.DownloadURL)
-				if err != nil {
+				if updateFile, err = DownloadFile(update.DownloadURL); err != nil {
 					return err
+				} else {
+					return updateProcess(updateFile, update, "reboot", "recovery")
 				}
-				return updateProcess(updateFile, update, "reboot", "recovery")
+			} else {
+				return nil
 			}
-			return nil
 		}
 	case "cota":
 		{
-
 			// compare the cota version
-			data, err := getProp([]string{"ro.cloudwalker.cota.version"})
-			if err != nil {
+			if result, err := comapareOTAVersion(update.BuildDate, false); err != nil {
 				return err
-			}
-			cotaVersion, err := strconv.ParseInt(strings.TrimSpace(strings.Replace(strings.Replace(data, "\n", "", -1), "_", "", -1)), 10, 64)
-			if err != nil {
-				return err
-			}
-
-			serverVersion, err := strconv.ParseInt(strings.TrimSpace(strings.Replace(strings.Replace(update.BuildDate, "\n", "", -1), "_", "", -1)), 10, 64)
-			if err != nil {
-				return err
-			}
-			if serverVersion > cotaVersion {
+			} else if result {
 				// Downloading a zip file.
-				updateFile, err = DownloadFile(update.DownloadURL)
-				if err != nil {
+				if updateFile, err = DownloadFile(update.DownloadURL); err != nil {
 					return err
+				} else {
+					return updateProcess(updateFile, update, "reboot", "recovery")
 				}
-				return updateProcess(updateFile, update, "reboot", "recovery")
+			} else {
+				return nil
 			}
-			return nil
 		}
 	}
 	return nil

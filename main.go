@@ -1,3 +1,6 @@
+// Updater Package
+// This package used to install the apk or ota from base on the action provided by the server.
+// Action used are INSTALL, UNINSTALL, UPGRADE, DOWNGRADE, FOTA, COTA.
 package main
 
 import (
@@ -86,6 +89,10 @@ func main() {
 	log.Println("Completed.")
 }
 
+
+// Helper Funtions for handeling actions
+
+//Download and apk file and install it.
 func downloadNInstall(update *Updater) (err error) {
 	// Downloading a file.
 	updateFile, err := DownloadFile(update.DownloadURL)
@@ -109,8 +116,9 @@ func downloadNInstall(update *Updater) (err error) {
 	return err
 }
 
+
+// uninstalling the app will give two result first will give "success" or a big stack trace.
 func uninstallApp(packageName string) error {
-	// uninstalling the app will give two result first will give "success" or a big stack trace.
 	cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("pm uninstall  %s", packageName)).Output()
 	if err != nil {
 		return err
@@ -122,8 +130,9 @@ func uninstallApp(packageName string) error {
 	return nil
 }
 
+
+// if app is already installed.. compare the version of the app.
 func compareAppVersion(serverAppVersion int, packageName string) (isServerVersionHigher bool, err error) {
-	// if app is already installed.. compare the version of the app.
 	log.Printf("app already installed %s", packageName)
 	cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("dumpsys package %s | grep versionCode", packageName)).Output()
 	if err != nil {
@@ -143,8 +152,9 @@ func compareAppVersion(serverAppVersion int, packageName string) (isServerVersio
 	}
 }
 
+
+// check if the app is installed or not
 func isAppInstalled(packageName string) (bool, error) {
-	// check if the app is installed or not
 	if result, err := execute("sh", "-c", "pm list packages  "+packageName); err != nil {
 		return false, err
 	} else if result == "" {
@@ -154,10 +164,10 @@ func isAppInstalled(packageName string) (bool, error) {
 	}
 }
 
-func comapareOTAVersion(buildDate string, isFOTA bool) (isOTAVersionHigher bool, err error) {
+func comapareOTAVersion(buildDate, action string) (isOTAVersionHigher bool, err error) {
 	// compare the fota version
 	var data string
-	if isFOTA {
+	if action == "fota" {
 		data, err = getProp([]string{"ro.cvte.ota.version", "ro.build.date.utc"})
 		if err != nil {
 			return false, err
@@ -233,25 +243,10 @@ func handlingUpdate(update *Updater) error {
 			}
 		}
 	case "fota":
-		{
-			// compare the fota version
-			if result, err := comapareOTAVersion(update.BuildDate, true); err != nil {
-				return err
-			} else if result {
-				// Downloading a zip file.
-				if updateFile, err = DownloadFile(update.DownloadURL); err != nil {
-					return err
-				} else {
-					return updateProcess(updateFile, update, "reboot", "recovery")
-				}
-			} else {
-				return nil
-			}
-		}
 	case "cota":
 		{
 			// compare the cota version
-			if result, err := comapareOTAVersion(update.BuildDate, false); err != nil {
+			if result, err := comapareOTAVersion(update.BuildDate, update.Action); err != nil {
 				return err
 			} else if result {
 				// Downloading a zip file.
